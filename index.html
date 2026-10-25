@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>올케어에듀학원 · 과학 학습현황</title>
+<meta name="description" content="과학 주간테스트 답 입력 · 결과 리포트 · 오답 시험지">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="올케어에듀학원">
+<meta property="og:title" content="올케어에듀학원 · 과학 학습현황">
+<meta property="og:description" content="과학 주간테스트 답 입력 · 결과 리포트 · 오답 시험지">
+<meta property="og:image" content="https://allcare-edu.github.io/science/og.png">
+<meta name="theme-color" content="#ffffff">
+<meta name="robots" content="noindex,nofollow">
+<link rel="icon" href="https://allcare-edu.github.io/icon.png">
+<link rel="apple-touch-icon" href="https://allcare-edu.github.io/icon.png">
+<style>
+body{margin:0;background:#F5F3F1;font:15px/1.55 -apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;color:#1d2433}
+#ld{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:#7a6f68}
+#ld .lg img{width:min(300px,78vw);height:auto;display:block}
+#ld .sp{width:30px;height:30px;border:3px solid #E3DBD5;border-top-color:#4E3629;border-radius:50%;animation:r 0.9s linear infinite}
+@keyframes r{to{transform:rotate(360deg)}}
+#ld button{background:#4E3629;color:#fff;border:0;border-radius:8px;padding:9px 16px;font:inherit}
+#ac-toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#1d2433;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;z-index:99;max-width:86vw;display:none}
+</style>
+</head>
+<body>
+<div id="ld"><div class="lg"><img src="https://allcare-edu.github.io/logo.png?v=3" alt="올케어에듀학원"></div><div class="sp"></div><div id="ldm">과학 학습현황을 불러오는 중…</div></div>
+<script>
+(function () {
+  // Apps Script 웹앱 주소 (배포 후 /exec 주소로 바꿈 · 새 배포를 만들지 말고 '새 버전'으로 갱신)
+  var API = '__WEBAPP_URL__';
+  var q = location.search.replace(/^\?/, '');
+
+  function toast(t) {
+    var e = document.getElementById('ac-toast');
+    if (!e) { e = document.createElement('div'); e.id = 'ac-toast'; document.body.appendChild(e); }
+    e.textContent = t; e.style.display = 'block';
+    clearTimeout(e._t); e._t = setTimeout(function () { e.style.display = 'none'; }, 4000);
+  }
+  function jsonp(params, cb, ms) {
+    var n = '__ac' + Date.now() + Math.floor(Math.random() * 1e6), s = document.createElement('script'), done = false;
+    function fin(o) { if (done) return; done = true; clearTimeout(t); try { delete window[n]; } catch (x) { window[n] = undefined; } if (s.parentNode) s.parentNode.removeChild(s); cb(o); }
+    var t = setTimeout(function () { fin({ ok: false, err: '응답이 늦습니다' }); }, ms || 45000);
+    window[n] = fin;
+    s.onerror = function () { fin({ ok: false, err: '연결하지 못했습니다' }); };
+    s.src = API + '?' + params + '&cb=' + n + '&_=' + Date.now();
+    document.head.appendChild(s);
+  }
+
+  // google.script.run 대신 쓰는 연결 (서버가 허용한 기능만: 답 제출 · 재응시 허용)
+  function call(fn, args, ok, ng) {
+    function h(o) {
+      if (o && o.ok) { if (ok) ok(o.r); }
+      else { var e = new Error((o && o.err) || '저장하지 못했습니다'); if (ng) ng(e); else toast('⚠ ' + e.message); }
+    }
+    if (window.fetch) {
+      fetch(API + '?api=run', { method: 'POST', body: JSON.stringify({ fn: fn, args: args }), headers: { 'Content-Type': 'text/plain;charset=utf-8' } })
+        .then(function (r) { return r.json(); }).then(h)
+        .catch(function () { h({ ok: false, err: '전송 결과를 확인하지 못했습니다. 새로고침해서 제출됐는지 확인해 주세요.' }); });
+    } else {
+      jsonp('api=run&fn=' + encodeURIComponent(fn) + '&args=' + encodeURIComponent(JSON.stringify(args)), h);
+    }
+  }
+  function runner(ok, ng) {
+    var o = {
+      withSuccessHandler: function (f) { return runner(f, ng); },
+      withFailureHandler: function (f) { return runner(ok, f); },
+      withUserObject: function () { return runner(ok, ng); }
+    };
+    if (window.Proxy) return new Proxy(o, { get: function (t, k) { return k in t ? t[k] : function () { call(k, [].slice.call(arguments), ok, ng); }; } });
+    ['apiSubmit', 'apiReset'].forEach(function (k) { o[k] = function () { call(k, [].slice.call(arguments), ok, ng); }; });
+    return o;
+  }
+  window.google = window.google || {}; window.google.script = { run: runner() };
+
+  function render(o) {
+    var d = new DOMParser().parseFromString(o.html, 'text/html');
+    if (o.title) document.title = o.title;
+    var olds = document.head.querySelectorAll('style'); for (var i = 0; i < olds.length; i++) olds[i].parentNode.removeChild(olds[i]);
+    var st = d.head.querySelectorAll('style'); for (var j = 0; j < st.length; j++) document.head.appendChild(st[j].cloneNode(true));
+    document.body.innerHTML = d.body.innerHTML;
+    var sc = document.body.querySelectorAll('script');
+    for (var k = 0; k < sc.length; k++) { var n = document.createElement('script'); n.textContent = sc[k].textContent; sc[k].parentNode.replaceChild(n, sc[k]); }
+    window.scrollTo(0, 0);
+  }
+  function fail(msg) {
+    document.getElementById('ld').innerHTML = '<div class="lg"><img src="https://allcare-edu.github.io/logo.png?v=3" alt="올케어에듀학원"></div><div>' + msg + '</div><button onclick="location.reload()">다시 불러오기</button><div style="font-size:13px">계속 안 되면 학원(010-4717-6373)으로 연락 주세요.</div>';
+  }
+
+  if (!/(^|&)(s|p|a)=/.test(q)) { fail('학원에서 받은 개인 링크로 들어와 주세요.'); return; }
+  var tries = 0;
+  (function load() {
+    jsonp('api=page&' + q, function (o) {
+      if (o && o.ok) render(o);
+      else if (++tries < 2) { document.getElementById('ldm').textContent = '조금만 더 기다려 주세요…'; load(); }
+      else fail('화면을 불러오지 못했습니다 (' + ((o && o.err) || '오류') + ').');
+    });
+  })();
+})();
+</script>
+</body>
+</html>
