@@ -40,6 +40,7 @@ var H = {
   개념: ['학년', '단원', '개념', '핵심정리'],
   응시: ['제출시각', '시험ID', '학년', '반', '이름', '답안', '점수', '맞은수', '문항수', '틀린번호', '출처', '상태'],
   리포트: ['작성시각', '시험ID', '대상', '반', '이름', '내용'],
+  오답체크: ['시각', '학생', '시험ID', '항목', '개념', '상태'],
   기록: ['시각', '내용']
 };
 
@@ -55,7 +56,7 @@ function setup() {
   if (!props.getProperty('KEY')) props.setProperty('KEY', Utilities.getUuid().replace(/-/g, '').slice(0, 26));
   writeTab_(ss, '명단', H.명단, ROSTER_DEFAULT.map(function (r) { return [r[0], r[1], GRADE_OF[r[0]], '재원', '', '', '', '', '', '']; }));
   writeTab_(ss, '강사', H.강사, TEACHERS_DEFAULT.map(function (r) { return [r[0], r[1], '', '', '사용']; }));
-  ['시험', '문항', '개념', '응시', '리포트', '기록'].forEach(function (t) { writeTab_(ss, t, H[t], []); });
+  ['시험', '문항', '개념', '응시', '리포트', '오답체크', '기록'].forEach(function (t) { writeTab_(ss, t, H[t], []); });
   writeGuide_(ss);
   SHARE_WITH.forEach(function (m) { try { ss.addEditor(m); } catch (e) { Logger.log('공유 실패 ' + m + ': ' + e); } });
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
@@ -461,6 +462,155 @@ function reports_(testId, target, name) {
   return rows_('리포트').filter(function (r) { return r[1] === testId && r[2] === target && (!name || r[4] === name); }).map(function (r) { return String(r[5]); });
 }
 
+// ───────────────────────────── 오답 정리 체크리스트 ─────────────────────────────
+// 항목: 'C:개념'(핵심 개념 정리) · 'Q:번호'(그 문항 다시 풀고 이해). 기록은 쌓이고 마지막 기록이 현재 상태.
+function checks_(name) {
+  var m = {};
+  rows_('오답체크').forEach(function (r) {
+    if (name && r[1] !== name) return;
+    m[r[1] + '|' + r[2] + '|' + r[3]] = { on: r[5] === '완료', at: ymdhms_(r[0]) };
+  });
+  return m;
+}
+// 시험 결과 x(studentAnalysis_ 의 한 항목) → 개념1 기준 오답 묶음 + 체크 항목
+function checklist_(name, x, ck) {
+  if (!x.s || !x.s.wrong.length) return { groups: [], done: 0, total: 0, last: '' };
+  var by = {}, order = [], last = '';
+  x.qs.forEach(function (q) {
+    if (x.s.wrong.indexOf(q.no) < 0) return;
+    var c = q.c1 || '기타';
+    if (!by[c]) { by[c] = { c: c, nos: [], all: 0 }; order.push(c); }
+    by[c].nos.push(q.no);
+  });
+  x.qs.forEach(function (q) { var c = q.c1 || '기타'; if (by[c]) by[c].all++; });
+  var done = 0, total = 0;
+  var groups = order.map(function (c) {
+    var g = by[c], items = [];
+    if (c !== '기타') items.push({ k: 'C:' + c, label: '핵심 개념 정리하기', c: c });
+    g.nos.forEach(function (n) { items.push({ k: 'Q:' + n, label: n + '번 다시 풀고 틀린 이유 이해하기', c: c }); });
+    items.forEach(function (it) {
+      var v = ck[name + '|' + x.t.id + '|' + it.k]; it.on = !!(v && v.on); it.at = v ? v.at : '';
+      if (it.on) done++; total++; if (v && v.at > last) last = v.at;
+    });
+    g.items = items; g.done = items.filter(function (i) { return i.on; }).length; g.total = items.length;
+    return g;
+  }).sort(function (a, b) { return b.nos.length - a.nos.length; });
+  return { groups: groups, done: done, total: total, last: last };
+}
+function apiCheck(code, testId, item, on) {
+  var w = who_('학생', code); if (!w) throw new Error('링크가 올바르지 않습니다');
+  var t = test_(testId); if (!t || t.grade !== w.grade) throw new Error('시험을 찾지 못했습니다');
+  var s = subOf_(w.name, testId); if (!s) throw new Error('먼저 시험을 제출해야 합니다');
+  var qs = questions_(testId), c = '';
+  var m = String(item).match(/^(C|Q):(.+)$/); if (!m) throw new Error('항목이 올바르지 않습니다');
+  if (m[1] === 'Q') {
+    var no = +m[2]; if (s.wrong.indexOf(no) < 0) throw new Error('틀린 문항이 아닙니다');
+    c = (qs.filter(function (q) { return q.no === no; })[0] || {}).c1 || '';
+  } else {
+    c = m[2];
+    if (!qs.some(function (q) { return q.c1 === c && s.wrong.indexOf(q.no) >= 0; })) throw new Error('보완할 개념이 아닙니다');
+  }
+  append_('오답체크', [[now_(), w.name, testId, item, c, on ? '완료' : '취소']]);
+  var A = studentAnalysis_(w.name, w.grade), x = A.res.filter(function (r) { return r.t.id === testId; })[0];
+  var cl = checklist_(w.name, x, checks_(w.name));
+  return { done: cl.done, total: cl.total };
+}
+// 단원 → 소항목(개념1) 누적: 출제 · 틀림 · 오답 정리
+function unitOrder_() {
+  var u = {}, c = {}, i = 0;
+  rows_('개념').forEach(function (r) { var un = String(r[1]), cn = String(r[2]); if (!(un in u)) u[un] = i; c[cn] = { unit: un, i: i }; i++; });
+  return { u: u, c: c };
+}
+function cumul_(name, A, ck) {
+  var O = unitOrder_(), units = {};
+  A.res.forEach(function (x) {
+    if (!x.s) return;
+    var cl = checklist_(name, x, ck), gmap = {};
+    cl.groups.forEach(function (g) { gmap[g.c] = g; });
+    x.qs.forEach(function (q) {
+      var c = q.c1 || '기타', un = (O.c[c] && O.c[c].unit) || x.t.unit || '기타';
+      var U = units[un] = units[un] || { unit: un, n: 0, miss: 0, cs: {} };
+      var C = U.cs[c] = U.cs[c] || { c: c, n: 0, miss: 0, done: 0, total: 0, tests: {} };
+      U.n++; C.n++;
+      if (x.s.wrong.indexOf(q.no) >= 0) { U.miss++; C.miss++; C.tests[x.t.id] = 1; }
+    });
+    Object.keys(gmap).forEach(function (c) {
+      var un = (O.c[c] && O.c[c].unit) || x.t.unit || '기타';
+      var C = units[un] && units[un].cs[c]; if (C) { C.done += gmap[c].done; C.total += gmap[c].total; }
+    });
+  });
+  return Object.keys(units).sort(function (a, b) { return (a in O.u ? O.u[a] : 999) - (b in O.u ? O.u[b] : 999); }).map(function (k) {
+    var U = units[k];
+    U.list = Object.keys(U.cs).map(function (c) { return U.cs[c]; }).sort(function (a, b) { return (O.c[a.c] ? O.c[a.c].i : 999) - (O.c[b.c] ? O.c[b.c].i : 999); });
+    return U;
+  });
+}
+function pct_(a, b) { return b ? Math.round(a / b * 100) : 0; }
+// 강사용: 학년 전체 단원 → 소항목 누적 정답률 · 약한 학생
+function classCumulHtml_(grade, roster) {
+  var O = unitOrder_(), units = {}, names = roster.map(function (s) { return s.name; });
+  tests_().filter(function (t) { return t.grade === grade; }).forEach(function (t) {
+    var subs = subs_(function (r) { return r[1] === t.id; }).filter(function (s) { return names.indexOf(s.name) >= 0; });
+    if (!subs.length) return;
+    questions_(t.id).forEach(function (q) {
+      var c = q.c1 || '기타', un = (O.c[c] && O.c[c].unit) || t.unit || '기타';
+      var U = units[un] = units[un] || { unit: un, slots: 0, miss: 0, n: 0, cs: {} };
+      var C = U.cs[c] = U.cs[c] || { c: c, slots: 0, miss: 0, n: 0, who: {} };
+      U.n++; C.n++;
+      subs.forEach(function (s) {
+        U.slots++; C.slots++;
+        var w = C.who[s.name] = C.who[s.name] || [0, 0]; w[1]++;
+        if (s.wrong.indexOf(q.no) >= 0) { U.miss++; C.miss++; w[0]++; }
+      });
+    });
+  });
+  var keys = Object.keys(units).sort(function (a, b) { return (a in O.u ? O.u[a] : 999) - (b in O.u ? O.u[b] : 999); });
+  if (!keys.length) return '<p class="muted">아직 채점된 테스트가 없습니다.</p>';
+  var h = '<table class="cu"><tr><th>단원 · 소항목</th><th class="c">문항</th><th class="c">반 정답률</th><th>약한 학생(정답률 60% 미만)</th></tr>';
+  keys.forEach(function (k) {
+    var U = units[k];
+    h += '<tr class="un"><td>' + esc_(U.unit) + '</td><td class="c">' + U.n + '</td><td class="c">' + pct_(U.slots - U.miss, U.slots) + '%</td><td></td></tr>';
+    Object.keys(U.cs).map(function (c) { return U.cs[c]; }).sort(function (a, b) { return (O.c[a.c] ? O.c[a.c].i : 999) - (O.c[b.c] ? O.c[b.c].i : 999); }).forEach(function (C) {
+      var r = pct_(C.slots - C.miss, C.slots), cls = r < 60 ? 'warn' : r < 80 ? 'mid' : 'ok';
+      var weak = Object.keys(C.who).filter(function (n) { var w = C.who[n]; return w[1] && (w[1] - w[0]) / w[1] < 0.6; });
+      h += '<tr><td class="ci">' + esc_(C.c) + '</td><td class="c">' + C.n + '</td><td class="c"><span class="pill ' + cls + '">' + r + '%</span></td><td style="font-size:12px">' + esc_(weak.join(', ')) + '</td></tr>';
+    });
+  });
+  return h + '</table>';
+}
+function cumulHtml_(units, forParent) {
+  if (!units.length) return '<p class="muted">아직 채점된 테스트가 없습니다.</p>';
+  var h = '<table class="cu"><tr><th>단원 · 소항목</th><th class="c">출제</th><th class="c">틀림</th><th class="c">정답률</th><th class="c">오답 정리</th></tr>';
+  units.forEach(function (U) {
+    var rate = pct_(U.n - U.miss, U.n);
+    h += '<tr class="un"><td>' + esc_(U.unit) + '</td><td class="c">' + U.n + '</td><td class="c">' + U.miss + '</td><td class="c">' + rate + '%</td><td></td></tr>';
+    U.list.forEach(function (C) {
+      var r = pct_(C.n - C.miss, C.n), cls = r < 60 ? 'warn' : r < 80 ? 'mid' : 'ok';
+      var st = !C.miss ? '<span class="muted">-</span>' : (C.total && C.done >= C.total ? '<span class="pill ok">완료</span>' : '<span class="pill' + (C.done ? ' mid' : ' warn') + '">' + C.done + '/' + C.total + '</span>');
+      h += '<tr><td class="ci">' + esc_(C.c) + '</td><td class="c">' + C.n + '</td><td class="c">' + (C.miss || '<span class="muted">0</span>') + '</td><td class="c"><span class="pill ' + cls + '">' + r + '%</span></td><td class="c">' + st + '</td></tr>';
+    });
+  });
+  return h + '</table><p class="note">소항목은 문항의 주 개념 기준 · 오답 정리 = 체크한 항목 / 전체 항목' + (forParent ? '' : ' (결과·리포트에서 체크)') + '</p>';
+}
+function checklistHtml_(x, cl, tips, code) {
+  if (!cl.groups.length) return '';
+  var id = 'pg_' + x.t.id.replace(/[^\w]/g, '_');
+  var h = '<h3>보완할 개념 · 오답 정리 체크리스트 <span class="pill ' + (cl.done >= cl.total ? 'ok' : 'mid') + '" id="' + id + '">' + cl.done + '/' + cl.total + ' 완료</span></h3>' +
+    '<p class="note">오답 공부를 할 때마다 체크하세요. 체크한 결과는 선생님과 부모님 화면에도 보입니다.</p>';
+  cl.groups.forEach(function (g) {
+    h += '<div class="tip"><b>' + esc_(g.c) + '</b> <span class="note">' + g.nos.length + '/' + g.all + '문항 틀림 · ' + g.nos.join('·') + '번</span>' + (tips[g.c] ? '<br>' + esc_(tips[g.c]) : '') +
+      g.items.map(function (it) {
+        return '<label class="ck' + (it.on ? ' done' : '') + '"><input type="checkbox"' + (it.on ? ' checked' : '') + ' data-t="' + esc_(x.t.id) + '" data-k="' + esc_(it.k) + '" data-p="' + id + '" onchange="ck(this)"> <span>' + esc_(it.label) + '</span></label>';
+      }).join('') + '</div>';
+  });
+  return h;
+}
+function checkScript_(code) {
+  return '<script>function ck(el){var l=el.closest("label");l.classList.toggle("done",el.checked);el.disabled=true;' +
+    'google.script.run.withSuccessHandler(function(r){el.disabled=false;var p=document.getElementById(el.dataset.p);if(p){p.textContent=r.done+"/"+r.total+" 완료";p.className="pill "+(r.done>=r.total?"ok":"mid")}})' +
+    '.withFailureHandler(function(e){el.disabled=false;el.checked=!el.checked;l.classList.toggle("done",el.checked);alert(e.message||e)}).apiCheck(' + JSON.stringify(code) + ',el.dataset.t,el.dataset.k,el.checked)}</script>';
+}
+
 // ───────────────────────────── 웹 진입점 ─────────────────────────────
 function doGet(e) {
   var p = (e && e.parameter) || {};
@@ -476,7 +626,7 @@ function doPost(e) {
   return json_({ ok: false, err: 'api' });
 }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
-function apiMap_() { return { apiSubmit: apiSubmit, apiReset: apiReset }; }
+function apiMap_() { return { apiSubmit: apiSubmit, apiReset: apiReset, apiCheck: apiCheck }; }
 function api_(p, body) {
   var out;
   try {
@@ -520,7 +670,7 @@ var CSS_ = 'body{margin:0;background:#F5F3F1;font:15px/1.55 -apple-system,"Apple
   '.brand{background:#fff;color:' + BRAND + ';padding:9px 16px;border-bottom:3px solid ' + BRAND + ';display:flex;align-items:center;gap:10px;font-size:15px}.brand img{height:28px;width:auto;flex:0 0 auto;object-fit:contain;display:block}.brand em{font-style:normal;font-weight:700;border-left:1px solid #DDD5CF;padding-left:10px;white-space:nowrap}.brand span{margin-left:auto;color:#7a6f68;font-size:13px;white-space:nowrap}@media(max-width:380px){.brand{gap:8px;padding:8px 12px}.brand img{height:21px}.brand em{font-size:14px;padding-left:8px}}' +
   '.wrap{max-width:760px;margin:0 auto;padding:12px}.card{background:#fff;border-radius:12px;padding:14px 16px;margin:0 0 12px;box-shadow:0 1px 3px rgba(40,25,15,.08)}' +
   'h1{font-size:20px;margin:4px 0 2px}h2{font-size:16px;margin:0 0 10px;color:' + BRAND + '}h3{font-size:15px;margin:12px 0 6px}.sub{color:#7a6f68;font-size:13px}' +
-  '.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.kpi{background:#F5F3F1;border-radius:10px;padding:10px 8px;text-align:center}.kpi b{display:block;font-size:20px;color:' + BRAND + '}.kpi small{color:#7a6f68;font-size:12px}' +
+  '.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(72px,1fr));gap:8px}.kpi{background:#F5F3F1;border-radius:10px;padding:10px 8px;text-align:center}.kpi b{display:block;font-size:20px;color:' + BRAND + '}.kpi small{color:#7a6f68;font-size:12px}' +
   '.bar{height:10px;background:#EDE7E2;border-radius:6px;overflow:hidden}.bar i{display:block;height:100%;background:' + BRAND + '}.bar i.hot{background:#B3261E}' +
   '.row{display:flex;align-items:center;gap:8px;margin:6px 0}.row .lab{width:150px;font-size:13px;flex:none}.row .bar{flex:1}.row .num{width:46px;text-align:right;font-size:13px;color:#7a6f68}' +
   'table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:6px 4px;border-bottom:1px solid #F0EBE7;text-align:left;vertical-align:top}th{color:#7a6f68;font-weight:600;white-space:nowrap}td.nw{white-space:nowrap}td.c,th.c{text-align:center}' +
@@ -534,6 +684,8 @@ var CSS_ = 'body{margin:0;background:#F5F3F1;font:15px/1.55 -apple-system,"Apple
   '.o{width:40px;height:40px;border-radius:50%;border:1.5px solid #CFC5BD;background:#fff;color:#5a4e46;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}.o.on{background:' + BRAND + ';border-color:' + BRAND + ';color:#fff}' +
   '.sticky{position:sticky;bottom:0;background:#fff;border-top:1px solid #EDE7E2;padding:10px 0;display:flex;align-items:center;gap:10px;justify-content:space-between}' +
   '.res .x{color:#B3261E;font-weight:700}.note{font-size:12px;color:#7a6f68}.foot{text-align:center;color:#a39a93;font-size:12px;padding:16px}.muted{color:#a39a93}' +
+  '.ck{display:flex;gap:8px;align-items:flex-start;padding:7px 2px 3px;font-size:14px;cursor:pointer;line-height:1.4}.ck input{width:20px;height:20px;flex:none;margin:0;accent-color:' + BRAND + '}.ck.done span{color:#a39a93;text-decoration:line-through}' +
+  '.cu tr.un td{background:#F5F3F1;font-weight:700;color:' + BRAND + '}.cu td.ci{padding-left:16px}' +
   'svg{max-width:560px;display:block;margin:0 auto}details summary{cursor:pointer;color:' + BRAND + ';font-weight:600}' +
   '@media print{.noprint{display:none!important}body{background:#fff}.wrap{max-width:none;padding:0}.card{box-shadow:none;padding:0;margin:0 0 8px}}';
 
@@ -579,13 +731,16 @@ function warnsHtml_(warns, who) {
 
 // ───────────────────────────── 학생 화면 ─────────────────────────────
 function studentHtml_(w, p) {
-  var A = studentAnalysis_(w.name, w.grade), tips = tipMap_(), view = p.v || '';
+  var A = studentAnalysis_(w.name, w.grade), tips = tipMap_();
   var me = '?s=' + encodeURIComponent(w.code);
   var head = '<div class="card"><h1>' + esc_(w.name) + ' · 과학 주간테스트</h1><div class="sub">' + esc_(w.cls) + ' · 권일준 선생님 · ' + esc_(today_()) + '</div></div>';
   var open = A.res.filter(function (x) { return !closed_(x.t); }).reverse();
-  var tabs = nav_([['', link_(me.slice(1)), '시험 입력'], ['r', link_(me.slice(1) + '&v=r'), '결과·리포트'], ['w', link_(me.slice(1) + '&v=w'), '오답 시험지']], view);
+  // 기본 화면: 아직 안 낸 이번 주 시험이 있으면 [이번주 시험], 없으면 [결과·리포트]
+  var view = p.v || (p.t || open.some(function (x) { return !x.s; }) ? 'i' : 'r');
+  if (view === '') view = 'i';
+  var tabs = nav_([['r', link_(me.slice(1) + '&v=r'), '결과·리포트'], ['w', link_(me.slice(1) + '&v=w'), '오답 시험지'], ['i', link_(me.slice(1) + '&v=i'), '이번주 시험']], view);
   var body = '';
-  if (view === '') {
+  if (view === 'i') {
     var todo = open.filter(function (x) { return !x.s; });
     if (p.t) todo = A.res.filter(function (x) { return x.t.id === p.t && !x.s; });
     if (!todo.length) {
@@ -597,19 +752,21 @@ function studentHtml_(w, p) {
     if (open.some(function (x) { return x.s; })) body += A.warns.length ? '<div class="card"><h2>반복 오답 경고</h2>' + warnsHtml_(A.warns.slice(-3), '학생') + '</div>' : '';
   } else if (view === 'r') {
     var pts = A.res.filter(function (x) { return x.s; }).map(function (x) { var cs = classStats_(x.t.id); return [md_(x.t.date), x.s.score, cs.avg]; });
+    var ck = checks_(w.name);
     body += '<div class="card"><h2>점수 추이</h2>' + trend_(pts) + '</div>';
     if (A.warns.length) body += '<div class="card"><h2>⚠ 반복 오답 경고</h2>' + warnsHtml_(A.warns, '학생') + '</div>';
+    body += '<div class="card"><h2>누적 결과 · 단원별</h2>' + cumulHtml_(cumul_(w.name, A, ck)) + '</div>';
     A.res.slice().reverse().forEach(function (x) {
       if (!x.s) { body += '<div class="card"><h2>' + esc_(x.t.title) + '</h2><p class="muted">' + (closed_(x.t) ? '미응시' : '아직 입력하지 않았습니다 · ' + md_(x.t.deadline) + '(토) 자정까지') + '</p></div>'; return; }
-      var miss = Object.keys(x.missC).map(function (c) { return { c: c, nos: x.missC[c], all: x.hasC[c] }; }).sort(function (a, b) { return b.nos.length - a.nos.length; });
       var rep = reports_(x.t.id, '학생', w.name);
       body += '<div class="card res"><h2>' + esc_(x.t.title) + ' · ' + x.s.score + '점</h2>' +
         '<div class="sub">' + esc_(x.t.unit) + ' · ' + x.s.right + '/' + x.s.n + '문항 · ' + esc_(x.s.src) + (x.s.late ? ' · <span class="pill mid">지각 제출</span>' : '') + '</div>' +
         (x.s.wrong.length ? '<p>틀린 문항: <span class="x">' + x.s.wrong.join(', ') + '</span></p>' : '<p>🎉 만점입니다!</p>') +
         (closed_(x.t) && x.s.wrong.length ? '<p class="noprint"><a class="btn" href="' + link_(me.slice(1) + '&w=' + encodeURIComponent(x.t.id)) + '" target="_top">📄 이 회차 오답 시험지</a></p>' : (x.s.wrong.length ? '<p class="note">정답·해설과 오답 시험지는 ' + md_(x.t.deadline) + '(토) 자정 마감 뒤에 열립니다.</p>' : '')) +
         (rep.length ? '<h3>선생님 리포트</h3><div class="rep">' + esc_(rep[0]) + '</div>' : '') +
-        (miss.length ? '<h3>보완할 개념</h3>' + tipsHtml_(miss, tips, function (c) { return c.nos.length + '/' + c.all + '문항 틀림 · ' + c.nos.join('·') + '번'; }) : '') + '</div>';
+        checklistHtml_(x, checklist_(w.name, x, ck), tips, w.code) + '</div>';
     });
+    body += checkScript_(w.code);
   } else if (view === 'w') {
     var done = A.res.filter(function (x) { return x.s && closed_(x.t) && x.s.wrong.length; }).reverse();
     body += '<div class="card"><h2>회차별 오답 시험지</h2>' + (done.length ? '<table>' + done.map(function (x) {
@@ -659,14 +816,23 @@ function parentHtml_(w, p) {
   var last = subs.length ? subs[subs.length - 1] : null;
   var pts = subs.map(function (x) { var cs = classStats_(x.t.id); return [md_(x.t.date), x.s.score, cs.avg]; });
   var h = '<div class="card"><h1>' + esc_(w.name) + ' · 과학 학습 현황</h1><div class="sub">' + esc_(w.cls) + ' · 권일준 선생님 · ' + esc_(today_()) + ' 기준 · 학부모용</div></div>';
-  h += '<div class="card">' + kpis_([['최근 점수', last ? last.s.score + '점' : '-'], ['응시', done + '/' + closed.length + '회'], ['반복 오답', A.warns.length ? A.warns.length + '건' : '없음']]) + '</div>';
+  var ck = checks_(w.name), cls = subs.map(function (x) { return checklist_(w.name, x, ck); });
+  var cd = cls.reduce(function (a, c) { return a + c.done; }, 0), ct = cls.reduce(function (a, c) { return a + c.total; }, 0);
+  var lastCk = cls.reduce(function (a, c) { return c.last > a ? c.last : a; }, '');
+  h += '<div class="card">' + kpis_([['최근 점수', last ? last.s.score + '점' : '-'], ['응시', done + '/' + closed.length + '회'], ['오답 정리', ct ? pct_(cd, ct) + '%' : '-'], ['반복 오답', A.warns.length ? A.warns.length + '건' : '없음']]) +
+    (ct ? '<p class="note">오답 정리: 학생이 틀린 개념을 다시 정리하고 문제를 다시 풀 때마다 직접 체크한 기록입니다' + (lastCk ? ' · 마지막 정리 ' + esc_(md_(lastCk.slice(0, 10))) + ' ' + esc_(lastCk.slice(11, 16)) : ' · 아직 정리 기록이 없습니다') + '.</p>' : '') + '</div>';
   h += '<div class="card"><h2>점수 추이</h2>' + trend_(pts) + '</div>';
+  h += '<div class="card"><h2>누적 결과 · 단원별</h2>' + cumulHtml_(cumul_(w.name, A, ck), true) + '</div>';
   if (A.warns.length) h += '<div class="card"><h2>⚠ 반복해서 틀리는 개념</h2>' + warnsHtml_(A.warns, '학부모') + '<p class="note">같은 개념을 연속으로 틀리면 표시됩니다. 수업에서 집중해서 다시 다룹니다.</p></div>';
   A.res.slice().reverse().slice(0, 6).forEach(function (x) {
     var st = x.s ? '<span class="pill ok">' + x.s.score + '점</span>' + (x.s.late ? '<span class="pill mid">지각</span>' : '') : (closed_(x.t) ? '<span class="pill warn">미응시</span>' : '<span class="pill">진행 중 · ' + md_(x.t.deadline) + '(토) 마감</span>');
     var rep = x.s ? reports_(x.t.id, '학부모', w.name) : [];
     var miss = Object.keys(x.missC).map(function (c) { return { c: c, nos: x.missC[c], all: x.hasC[c] }; }).sort(function (a, b) { return b.nos.length - a.nos.length; }).slice(0, 4);
-    h += '<div class="card"><h2>' + esc_(x.t.title) + ' ' + st + '</h2><div class="sub">' + esc_(x.t.unit) + '</div>' +
+    var cl = x.s ? checklist_(w.name, x, ck) : null;
+    var prog = cl && cl.total ? '<p><b>오답 정리</b> ' + cl.groups.filter(function (g) { return g.done >= g.total; }).length + '/' + cl.groups.length + '개 개념 완료 <span class="pill ' + (cl.done >= cl.total ? 'ok' : cl.done ? 'mid' : 'warn') + '">' + pct_(cl.done, cl.total) + '%</span>' +
+      (cl.last ? ' <span class="note">마지막 정리 ' + esc_(md_(cl.last.slice(0, 10))) + '</span>' : ' <span class="note">아직 시작 전</span>') + '</p>' +
+      '<div class="note">' + cl.groups.map(function (g) { return esc_(g.c) + ' ' + (g.done >= g.total ? '✓' : g.done + '/' + g.total); }).join(' · ') + '</div>' : '';
+    h += '<div class="card"><h2>' + esc_(x.t.title) + ' ' + st + '</h2><div class="sub">' + esc_(x.t.unit) + '</div>' + prog +
       (rep.length ? '<div class="rep">' + esc_(rep[0]) + '</div>' : (miss.length ? '<h3>보완이 필요한 개념</h3>' + tipsHtml_(miss, tips, function (c) { return c.nos.length + '/' + c.all + '문항'; }) : (x.s ? '<p>틀린 개념 없이 잘 해냈습니다.</p>' : ''))) + '</div>';
   });
   h += '<p class="note" style="text-align:center">문의: 올케어에듀학원 010-4717-6373</p>';
@@ -712,6 +878,27 @@ function teacherHtml_(w, p) {
       return '<tr><td class="c"><b>' + it.q.no + '</b></td><td class="c">' + ansTxt_(it.q.ans) + '</td><td class="c">' + it.wrong.length + '/' + subN + '</td><td>' + esc_(it.q.c1) + '</td><td>' + esc_(it.wrong.join(', ')) + '<div class="note">' + esc_(picks) + '</div></td></tr>';
     }).join('') + '</table><p class="note">전원 정답 문항은 숨겼습니다.</p></div>';
   }
+  // 오답 정리 현황 (학생 체크리스트)
+  var ckAll = checks_();
+  var ckRows = S.roster.map(function (s) {
+    var A = studentAnalysis_(s.name, s.grade), x = A.res.filter(function (r) { return r.t.id === cur.id; })[0];
+    var cl = x && x.s ? checklist_(s.name, x, ckAll) : null;
+    var tot = A.res.filter(function (r) { return r.s; }).map(function (r) { return checklist_(s.name, r, ckAll); });
+    var td = tot.reduce(function (a, c) { return a + c.done; }, 0), tt = tot.reduce(function (a, c) { return a + c.total; }, 0);
+    return { s: s, cl: cl, td: td, tt: tt };
+  });
+  if (ckRows.some(function (r) { return r.cl && r.cl.total; })) {
+    h += '<div class="card"><h2>오답 정리 현황</h2><p class="note">학생이 [결과·리포트]의 체크리스트에서 직접 체크한 기록 · 이 시험 기준(누적은 지금까지 전체)</p><table><tr><th>이름</th><th class="c">이 시험</th><th>개념별</th><th class="c">누적</th><th class="c">마지막</th></tr>' +
+      ckRows.map(function (r) {
+        if (!r.cl) return '<tr><td class="nw">' + esc_(r.s.name) + '</td><td class="c muted">미응시</td><td></td><td class="c">' + (r.tt ? pct_(r.td, r.tt) + '%' : '-') + '</td><td></td></tr>';
+        if (!r.cl.total) return '<tr><td class="nw">' + esc_(r.s.name) + '</td><td class="c"><span class="pill ok">오답 없음</span></td><td></td><td class="c">' + (r.tt ? pct_(r.td, r.tt) + '%' : '-') + '</td><td></td></tr>';
+        var p = pct_(r.cl.done, r.cl.total);
+        return '<tr><td class="nw">' + esc_(r.s.name) + '</td><td class="c"><span class="pill ' + (p >= 100 ? 'ok' : p ? 'mid' : 'warn') + '">' + r.cl.done + '/' + r.cl.total + '</span></td><td style="font-size:12px">' +
+          r.cl.groups.map(function (g) { return esc_(g.c) + ' ' + (g.done >= g.total ? '✓' : g.done + '/' + g.total); }).join(' · ') + '</td><td class="c">' + pct_(r.td, r.tt) + '%</td><td class="c nw">' + (r.cl.last ? md_(r.cl.last.slice(0, 10)) : '<span class="muted">-</span>') + '</td></tr>';
+      }).join('') + '</table></div>';
+  }
+  // 누적 결과 · 단원별 (반 전체)
+  h += '<div class="card"><h2>누적 결과 · 단원별 (' + esc_(grade) + ' 전체)</h2>' + classCumulHtml_(grade, S.roster) + '</div>';
   // 학생별
   h += '<div class="card"><h2>학생별</h2><table><tr><th>반</th><th>이름</th><th class="c">점수</th><th>틀린 문항</th><th class="noprint"></th></tr>' + S.roster.map(function (s) {
     var x = S.subs.filter(function (y) { return y.name === s.name; })[0];
