@@ -292,6 +292,7 @@ function who_(kind, code) {
 }
 function newCode_() { return Utilities.getUuid().replace(/-/g, '').slice(0, 10); }
 function shortUrl_(url) {
+  return url;   // 단축 링크 쓰지 않음 (2026-10-25 원장: da.gd 중간 화면이 불편) — 전체 주소 그대로
   try {
     var r = UrlFetchApp.fetch('https://da.gd/s?url=' + encodeURIComponent(url), { muteHttpExceptions: true });
     var t = r.getContentText().trim();
