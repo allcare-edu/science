@@ -105,12 +105,25 @@ body{margin:0;background:#F5F3F1;font:15px/1.55 -apple-system,"Apple SD Gothic N
   }
 
   if (!/(^|&)(s|p|a)=/.test(q)) { fail('학원에서 받은 개인 링크로 들어와 주세요.'); return; }
-  var tries = 0;
+  // 불러오기: ① 스크립트(JSONP) → ② fetch → ③ 다시 JSONP → 그래도 안 되면 ④ 구글 앱스 스크립트 화면으로 직접 이동
+  function viaFetch(cb) {
+    if (!window.fetch) { cb({ ok: false, err: 'fetch 없음' }); return; }
+    var done = false, t = setTimeout(function () { if (!done) { done = true; cb({ ok: false, err: '응답이 늦습니다' }); } }, 45000);
+    fetch(API + '?api=page&' + q + '&_=' + Date.now())
+      .then(function (r) { return r.json(); })
+      .then(function (o) { if (!done) { done = true; clearTimeout(t); cb(o); } })
+      .catch(function (e) { if (!done) { done = true; clearTimeout(t); cb({ ok: false, err: 'fetch ' + ((e && e.message) || e) }); } });
+  }
+  var tries = 0, errs = [];
   (function load() {
-    jsonp('api=page&' + q, function (o) {
-      if (o && o.ok) render(o);
-      else if (++tries < 2) { document.getElementById('ldm').textContent = '조금만 더 기다려 주세요…'; load(); }
-      else fail('화면을 불러오지 못했습니다 (' + ((o && o.err) || '오류') + ').');
+    var step = tries === 1 ? viaFetch : function (cb) { jsonp('api=page&' + q, cb); };
+    step(function (o) {
+      if (o && o.ok) { render(o); return; }
+      errs.push((o && o.err) || '오류');
+      if (++tries < 3) { document.getElementById('ldm').textContent = '조금만 더 기다려 주세요…'; load(); return; }
+      document.getElementById('ldm').textContent = '다른 경로로 여는 중…';
+      if (!/(^|&)direct=1/.test(q)) { setTimeout(function () { location.replace(API + '?' + q); }, 600); return; }
+      fail('화면을 불러오지 못했습니다 (' + errs.join(' / ') + ').');
     });
   })();
 })();
