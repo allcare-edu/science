@@ -66,6 +66,17 @@ def pdf_layout(path):
                 m = re.match(r'^(\d{1,2})\)\s*\[정답\]', t)
                 if m:
                     ans_anchor.append(dict(no=int(m.group(1)), page=pno, col=col, y=bb[1], x1=bb[2], foot=foot, zbs=zbs))
+    # 문항 번호는 1, 2, 3 … 순서대로만 받는다 (문항 안의 '1. 2. 3.' 같은 목록 번호 제외)
+    seq, nxt = [], 1
+    for q in sorted(qs, key=lambda q: (q['page'], q['col'], q['y'])):
+        if q['no'] == nxt:
+            seq.append(q); nxt += 1
+    qs = seq
+    seq, nxt = [], 1
+    for a in sorted(ans_anchor, key=lambda a: (a['page'], a['col'], a['y'])):
+        if a['no'] == nxt:
+            seq.append(a); nxt += 1
+    ans_anchor = seq
     return doc, qs, ans_anchor, ans_page
 
 
@@ -92,6 +103,42 @@ def _segments(anchors, doc, top_default):
             out.setdefault(a['no'], []).append((page, (x0, a['y'] - 6, x1, y1)))
             prev_no = a['no']
     return out
+
+
+def _shared_context(doc, qsegs):
+    """'※ 그림은 … / ※ 여러 별의 …' 처럼 다음 문항들이 함께 쓰는 자료 묶음을
+    앞 문항 그림에서 떼어 내고, 같은 단에서 그 아래 시작하는 문항들 그림 앞에 붙인다."""
+    mid = doc[0].rect.width / 2
+    stars = []
+    for pno, page in enumerate(doc):
+        for b in page.get_text('dict')['blocks']:
+            for l in b.get('lines', []):
+                t = ''.join(s['text'] for s in l['spans']).strip()
+                if t.startswith('※'):
+                    stars.append((pno, 0 if l['bbox'][0] < mid else 1, l['bbox'][1]))
+    firsts = {no: segs[0] for no, segs in qsegs.items()}
+    for pno, col, y in stars:
+        owner = None
+        for no, segs in qsegs.items():
+            for i, (p, (x0, y0, x1, y1)) in enumerate(segs):
+                if p == pno and (0 if x0 < mid else 1) == col and y0 - 2 <= y <= y1:
+                    owner = (no, i)
+        if not owner:
+            continue
+        no, i = owner
+        p, (x0, y0, x1, y1) = qsegs[no][i]
+        users = sorted(n for n, (fp, (fx0, fy0, _, _)) in firsts.items()
+                       if n != no and fp == pno and (0 if fx0 < mid else 1) == col and fy0 > y)
+        if not users:
+            continue
+        ctx = (p, (x0, y - 4, x1, y1))
+        if y - 6 > y0 + 4:
+            qsegs[no][i] = (p, (x0, y0, x1, y - 6))
+        else:
+            qsegs[no].pop(i)
+        for n in users:
+            qsegs[n] = [ctx] + qsegs[n]
+        print(f'  ※ 공통 자료: {no}번에서 떼어 {users}번 앞에 붙임')
 
 
 def _render(doc, segs, mask_zb=True):
@@ -184,6 +231,7 @@ def build(args):
         _mask_zb(doc)
         hdr_top = lambda page: 108 if page == 0 else 66
         qsegs = _segments(qa, doc, hdr_top)
+        _shared_context(doc, qsegs)
         asegs = _segments(aa, doc, lambda page: 66) if aa else {}
         pdf_info = dict(n=len(qa), ans=pa)
         for no, segs in qsegs.items():

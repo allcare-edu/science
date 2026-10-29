@@ -170,11 +170,11 @@ function sync_(force) {
     }
     // 2) 시험 — 「시험/{시험ID}.zip」이 올라오면 풀어서 「시험/{시험ID}/」 폴더로 (예전 폴더는 이름 뒤에 _old_시각)
     var tdir = sub_(root, '시험');
-    unzipTests_(tdir, out);
+    var pending = unzipTests_(tdir, out);
     var tf = tdir.getFolders();
     while (tf.hasNext()) {
       var folder = tf.next();
-      if (/_old_/.test(folder.getName())) continue;
+      if (/_old_/.test(folder.getName()) || pending.indexOf(folder.getName()) >= 0) continue;
       var tj = first_(folder, 'test.json');
       if (!tj) continue;
       var tg = first_(folder, 'tags.json');
@@ -210,18 +210,38 @@ function sync_(force) {
   } finally { lock.releaseLock(); }
 }
 function unzipTests_(tdir, out) {
-  var zs = tdir.getFiles();
+  // 큰 zip은 6분 실행 제한에 걸릴 수 있어 이어서 풀기: 폴더에 없는 파일만 만들고, 4분 넘으면 다음 실행(10분 뒤)에 계속.
+  // 다 풀면 폴더에 _complete 표시를 두고 zip 이름을 .done 으로 바꾼다. 다 푼 폴더가 있는데 같은 zip이 다시 오면 예전 폴더는 _old_시각.
+  var t0 = Date.now(), pending = [], zs = tdir.getFiles();
   while (zs.hasNext()) {
     var z = zs.next(), m = z.getName().match(/^(.+)\.zip$/i);
     if (!m) continue;
-    var id = m[1], blobs = Utilities.unzip(z.getBlob());
-    var old = tdir.getFoldersByName(id);
-    while (old.hasNext()) old.next().setName(id + '_old_' + Utilities.formatDate(new Date(), TZ, 'yyyyMMddHHmmss'));
-    var nf = tdir.createFolder(id);
-    blobs.forEach(function (b) { var n = String(b.getName()).split('/').pop(); if (n) nf.createFile(b.setName(n)); });
+    var id = m[1];
+    if (Date.now() - t0 > 240000) { pending.push(id); continue; }
+    var blobs = Utilities.unzip(z.getBlob()), nf = null, it = tdir.getFoldersByName(id);
+    while (it.hasNext()) {
+      var f = it.next();
+      if (f.getFilesByName('_complete').hasNext()) f.setName(id + '_old_' + Utilities.formatDate(new Date(), TZ, 'yyyyMMddHHmmss'));
+      else if (!nf) nf = f;
+    }
+    if (!nf) nf = tdir.createFolder(id);
+    var have = {}, fi = nf.getFiles();
+    while (fi.hasNext()) have[fi.next().getName()] = 1;
+    // 그림 먼저, test.json · tags.json 은 마지막에
+    blobs.sort(function (a, b) { return (/\.json$/i.test(a.getName()) ? 1 : 0) - (/\.json$/i.test(b.getName()) ? 1 : 0); });
+    var made = 0, stopped = false;
+    for (var i = 0; i < blobs.length; i++) {
+      var n = String(blobs[i].getName()).split('/').pop();
+      if (!n || have[n]) continue;
+      if (Date.now() - t0 > 270000) { stopped = true; break; }
+      nf.createFile(blobs[i].setName(n)); made++;
+    }
+    if (stopped) { pending.push(id); out.unzipped = (out.unzipped || []).concat([id + ':' + made + '(이어서)']); continue; }
+    nf.createFile('_complete', now_());
     z.setName(z.getName() + '.done');
-    out.unzipped = (out.unzipped || []).concat([id + ':' + blobs.length]);
+    out.unzipped = (out.unzipped || []).concat([id + ':' + made]);
   }
+  return pending;
 }
 function sub_(folder, name) { var it = folder.getFoldersByName(name); return it.hasNext() ? it.next() : folder.createFolder(name); }
 function first_(folder, name) { var it = folder.getFilesByName(name); return it.hasNext() ? it.next() : null; }
