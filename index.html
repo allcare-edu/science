@@ -31,6 +31,22 @@ body{margin:0;background:#F5F3F1;font:15px/1.55 -apple-system,"Apple SD Gothic N
   // Apps Script 웹앱 주소 (배포 후 /exec 주소로 바꿈 · 새 배포를 만들지 말고 '새 버전'으로 갱신)
   var API = 'https://script.google.com/macros/s/AKfycbyre6NAsy_dsISL2-T3CiCzE7t5rMIG0la0aA_WQTCvUqonRDXq8bB2LzvNMMi57thnGw/exec';
   var q = location.search.replace(/^\?/, '');
+  // 카톡·문자로 보낸 링크 끝에 따옴표(구글 시트 셀 복사 시 " 가 붙음)·괄호·마침표 등이 붙어도 열리도록 코드만 남김
+  (function () {
+    var out = [];
+    q.split('&').forEach(function (kv) {
+      var i = kv.indexOf('='); if (i < 0) return;
+      var k = kv.slice(0, i), v = kv.slice(i + 1);
+      try { k = decodeURIComponent(k); } catch (e) {}
+      try { v = decodeURIComponent(v.replace(/\+/g, ' ')); } catch (e) { v = v.replace(/%22|%27|%E2%80%9[CDE89]/gi, ''); }
+      k = k.replace(/[^a-z]/gi, '');
+      if (k === 's' || k === 'p' || k === 'a') { var m = v.match(/[0-9a-f]{10}/i); v = m ? m[0].toLowerCase() : ''; }
+      else v = v.replace(/["'“”‘’<>()\s]+/g, '');
+      if (k) out.push(k + '=' + encodeURIComponent(v));
+    });
+    var clean = out.join('&');
+    if (clean !== q) { q = clean; try { history.replaceState(null, '', location.pathname + (q ? '?' + q : '')); } catch (e) {} }
+  })();
 
   function toast(t) {
     var e = document.getElementById('ac-toast');
